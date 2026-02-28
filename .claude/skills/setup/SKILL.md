@@ -75,7 +75,11 @@ Run `npx tsx setup/index.ts --step container -- --runtime <chosen>` and parse th
 
 ## 4. Claude Authentication (No Script)
 
-If HAS_ENV=true from step 2, read `.env` and check for `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN`. If present, confirm with user: keep or reconfigure?
+Check both auth sources before asking for new credentials:
+- Project `.env`: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`
+- Claude settings: `~/.claude/settings.json` → `env.ANTHROPIC_AUTH_TOKEN`
+
+If either source is already configured, confirm with user: keep or reconfigure?
 
 AskUserQuestion: Claude subscription (Pro/Max) vs Anthropic API key vs cc-switch provider config?
 
