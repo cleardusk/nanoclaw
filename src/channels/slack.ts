@@ -1,5 +1,9 @@
 import { App, LogLevel } from '@slack/bolt';
-import type { GenericMessageEvent, BotMessageEvent } from '@slack/types';
+import type {
+  AppMentionEvent,
+  GenericMessageEvent,
+  BotMessageEvent,
+} from '@slack/types';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
@@ -20,6 +24,7 @@ const MAX_MESSAGE_LENGTH = 4000;
 // we filter to regular messages (GenericMessageEvent, subtype undefined) and bot messages
 // (BotMessageEvent, subtype 'bot_message') so we can track our own output.
 type HandledMessageEvent = GenericMessageEvent | BotMessageEvent;
+type HandledSlackEvent = HandledMessageEvent | AppMentionEvent;
 
 export interface SlackChannelOpts {
   onMessage: OnInboundMessage;
@@ -74,59 +79,63 @@ export class SlackChannel implements Channel {
       if (subtype && subtype !== 'bot_message') return;
 
       // After filtering, event is either GenericMessageEvent or BotMessageEvent
-      const msg = event as HandledMessageEvent;
+      await this.handleInboundEvent(event as HandledMessageEvent);
+    });
 
-      if (!msg.text) return;
+    // In channel mentions are delivered as a dedicated app_mention event.
+    // Handle it explicitly so "@nanoclaw ..." always reaches the router.
+    this.app.event('app_mention', async ({ event }) => {
+      await this.handleInboundEvent(event as AppMentionEvent);
+    });
+  }
 
-      // Threaded replies are flattened into the channel conversation.
-      // The agent sees them alongside channel-level messages; responses
-      // always go to the channel, not back into the thread.
+  private async handleInboundEvent(event: HandledSlackEvent): Promise<void> {
+    if (!event.text) return;
 
-      const jid = `slack:${msg.channel}`;
-      const timestamp = new Date(parseFloat(msg.ts) * 1000).toISOString();
-      const isGroup = msg.channel_type !== 'im';
+    // Threaded replies are flattened into the channel conversation.
+    // The agent sees them alongside channel-level messages; responses
+    // always go to the channel, not back into the thread.
+    const jid = `slack:${event.channel}`;
+    const timestamp = new Date(parseFloat(event.ts) * 1000).toISOString();
+    const isGroup = !('channel_type' in event && event.channel_type === 'im');
 
-      // Always report metadata for group discovery
-      this.opts.onChatMetadata(jid, timestamp, undefined, 'slack', isGroup);
+    // Always report metadata for group discovery
+    this.opts.onChatMetadata(jid, timestamp, undefined, 'slack', isGroup);
 
-      // Only deliver full messages for registered groups
-      const groups = this.opts.registeredGroups();
-      if (!groups[jid]) return;
+    // Only deliver full messages for registered groups
+    const groups = this.opts.registeredGroups();
+    if (!groups[jid]) return;
 
-      const isBotMessage = !!msg.bot_id || msg.user === this.botUserId;
+    const isBotMessage = !!event.bot_id || event.user === this.botUserId;
 
-      let senderName: string;
-      if (isBotMessage) {
-        senderName = ASSISTANT_NAME;
-      } else {
-        senderName =
-          (await this.resolveUserName(msg.user || '')) || msg.user || 'unknown';
+    let senderName: string;
+    if (isBotMessage) {
+      senderName = ASSISTANT_NAME;
+    } else {
+      senderName =
+        (await this.resolveUserName(event.user || '')) || event.user || 'unknown';
+    }
+
+    // Translate Slack <@UBOTID> mentions into TRIGGER_PATTERN format.
+    // Slack encodes @mentions as <@U12345>, which won't match TRIGGER_PATTERN
+    // (e.g., ^@<ASSISTANT_NAME>\b), so we prepend the trigger when the bot is @mentioned.
+    let content = event.text;
+    if (this.botUserId && !isBotMessage) {
+      const mentionPattern = `<@${this.botUserId}>`;
+      if (content.includes(mentionPattern) && !TRIGGER_PATTERN.test(content)) {
+        content = `@${ASSISTANT_NAME} ${content}`;
       }
+    }
 
-      // Translate Slack <@UBOTID> mentions into TRIGGER_PATTERN format.
-      // Slack encodes @mentions as <@U12345>, which won't match TRIGGER_PATTERN
-      // (e.g., ^@<ASSISTANT_NAME>\b), so we prepend the trigger when the bot is @mentioned.
-      let content = msg.text;
-      if (this.botUserId && !isBotMessage) {
-        const mentionPattern = `<@${this.botUserId}>`;
-        if (
-          content.includes(mentionPattern) &&
-          !TRIGGER_PATTERN.test(content)
-        ) {
-          content = `@${ASSISTANT_NAME} ${content}`;
-        }
-      }
-
-      this.opts.onMessage(jid, {
-        id: msg.ts,
-        chat_jid: jid,
-        sender: msg.user || msg.bot_id || '',
-        sender_name: senderName,
-        content,
-        timestamp,
-        is_from_me: isBotMessage,
-        is_bot_message: isBotMessage,
-      });
+    this.opts.onMessage(jid, {
+      id: event.ts,
+      chat_jid: jid,
+      sender: event.user || event.bot_id || '',
+      sender_name: senderName,
+      content,
+      timestamp,
+      is_from_me: isBotMessage,
+      is_bot_message: isBotMessage,
     });
   }
 

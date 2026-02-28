@@ -125,6 +125,25 @@ function createMessageEvent(overrides: {
   };
 }
 
+function createAppMentionEvent(overrides: {
+  channel?: string;
+  user?: string;
+  text?: string;
+  ts?: string;
+  threadTs?: string;
+}) {
+  return {
+    channel: overrides.channel ?? 'C0123456789',
+    user: overrides.user ?? 'U_USER_456',
+    text:
+      'text' in overrides
+        ? overrides.text
+        : '<@U_BOT_123> Hello from app mention',
+    ts: overrides.ts ?? '1704067200.000000',
+    thread_ts: overrides.threadTs,
+  };
+}
+
 function currentApp() {
   return appRef.current;
 }
@@ -133,6 +152,13 @@ async function triggerMessageEvent(
   event: ReturnType<typeof createMessageEvent>,
 ) {
   const handler = currentApp().eventHandlers.get('message');
+  if (handler) await handler({ event });
+}
+
+async function triggerAppMentionEvent(
+  event: ReturnType<typeof createAppMentionEvent>,
+) {
+  const handler = currentApp().eventHandlers.get('app_mention');
   if (handler) await handler({ event });
 }
 
@@ -159,11 +185,12 @@ describe('SlackChannel', () => {
       expect(channel.isConnected()).toBe(true);
     });
 
-    it('registers message event handler on construction', () => {
+    it('registers Slack inbound event handlers on construction', () => {
       const opts = createTestOpts();
       new SlackChannel(opts);
 
       expect(currentApp().eventHandlers.has('message')).toBe(true);
+      expect(currentApp().eventHandlers.has('app_mention')).toBe(true);
     });
 
     it('gets bot user ID on connect', async () => {
@@ -219,6 +246,33 @@ describe('SlackChannel', () => {
           chat_jid: 'slack:C0123456789',
           sender: 'U_USER_456',
           content: 'Hello everyone',
+          is_from_me: false,
+        }),
+      );
+    });
+
+    it('delivers app_mention for registered channel', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const event = createAppMentionEvent({
+        text: '<@U_BOT_123> can you help?',
+      });
+      await triggerAppMentionEvent(event);
+
+      expect(opts.onChatMetadata).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.any(String),
+        undefined,
+        'slack',
+        true,
+      );
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          id: '1704067200.000000',
+          content: '@Jonesy <@U_BOT_123> can you help?',
           is_from_me: false,
         }),
       );
