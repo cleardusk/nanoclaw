@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import fs from 'fs';
 
 // --- Mocks ---
 
@@ -23,6 +24,10 @@ vi.mock('../db.js', () => ({
   updateChatName: vi.fn(),
 }));
 
+vi.mock('../group-folder.js', () => ({
+  resolveGroupFolderPath: (folder: string) => `/tmp/nanoclaw-groups/${folder}`,
+}));
+
 // --- @slack/bolt mock ---
 
 type Handler = (...args: any[]) => any;
@@ -41,6 +46,9 @@ vi.mock('@slack/bolt', () => ({
       },
       chat: {
         postMessage: vi.fn().mockResolvedValue(undefined),
+      },
+      files: {
+        uploadV2: vi.fn().mockResolvedValue(undefined),
       },
       conversations: {
         list: vi.fn().mockResolvedValue({
@@ -742,6 +750,55 @@ describe('SlackChannel', () => {
         channel: 'C0123456789',
         text: 'Second queued',
       });
+    });
+
+    it('uploads referenced /workspace/group PDF to Slack', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const hostDir = '/tmp/nanoclaw-groups/test-channel';
+      fs.mkdirSync(hostDir, { recursive: true });
+      fs.writeFileSync(`${hostDir}/report.pdf`, 'fake pdf content');
+
+      await channel.sendMessage(
+        'slack:C0123456789',
+        '已生成文件：`/workspace/group/report.pdf`',
+      );
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        text: '已上传文件：report.pdf',
+      });
+      expect(currentApp().client.chat.postMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('/workspace/group/report.pdf'),
+        }),
+      );
+      expect(currentApp().client.files.uploadV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel_id: 'C0123456789',
+          filename: 'report.pdf',
+          title: 'report.pdf',
+        }),
+      );
+    });
+
+    it('skips PDF upload when referenced file is missing', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await channel.sendMessage(
+        'slack:C0123456789',
+        '文件：`/workspace/group/not-exists.pdf`',
+      );
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        text: 'PDF 已生成，但上传失败。请稍后重试。',
+      });
+      expect(currentApp().client.files.uploadV2).not.toHaveBeenCalled();
     });
   });
 

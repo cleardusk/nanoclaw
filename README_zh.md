@@ -114,7 +114,8 @@ claude
 ## 系统要求
 
 - macOS 或 Linux
-- Node.js 20+
+- Node.js 20+（推荐 20.x，CI 基线）
+  - 在部分环境中，Node 22+ 可能触发文件系统边缘问题（例如 `filesystem::equivalent`）。若遇到此类问题，请切换到 Node 20.x 并重启 NanoClaw。
 - [Claude Code](https://claude.ai/download)
 - [Apple Container](https://github.com/apple/container) (macOS) 或 [Docker](https://docker.com/products/docker-desktop) (macOS/Linux)
 

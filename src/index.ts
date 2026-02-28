@@ -40,6 +40,7 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
+import { warnIfNodeVersionNotRecommended } from './runtime-checks.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
@@ -450,6 +451,7 @@ function ensureContainerSystemRunning(): void {
 }
 
 async function main(): Promise<void> {
+  warnIfNodeVersionNotRecommended();
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');

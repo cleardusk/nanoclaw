@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+
 import { App, LogLevel } from '@slack/bolt';
 import type {
   AppMentionEvent,
@@ -8,6 +11,7 @@ import type {
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
+import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import {
   Channel,
@@ -19,6 +23,7 @@ import {
 // Slack's chat.postMessage API limits text to ~4000 characters per call.
 // Messages exceeding this are split into sequential chunks.
 const MAX_MESSAGE_LENGTH = 4000;
+const WORKSPACE_GROUP_PDF_RE = /`?(\/workspace\/group\/[^\s`"'<>]+\.pdf)`?/gi;
 
 // The message subtypes we process. Bolt delivers all subtypes via app.event('message');
 // we filter to regular messages (GenericMessageEvent, subtype undefined) and bot messages
@@ -177,17 +182,8 @@ export class SlackChannel implements Channel {
     }
 
     try {
-      // Slack limits messages to ~4000 characters; split if needed
-      if (text.length <= MAX_MESSAGE_LENGTH) {
-        await this.app.client.chat.postMessage({ channel: channelId, text });
-      } else {
-        for (let i = 0; i < text.length; i += MAX_MESSAGE_LENGTH) {
-          await this.app.client.chat.postMessage({
-            channel: channelId,
-            text: text.slice(i, i + MAX_MESSAGE_LENGTH),
-          });
-        }
-      }
+      await this.sendSlackPayload(jid, channelId, text);
+
       logger.info({ jid, length: text.length }, 'Slack message sent');
     } catch (err) {
       this.outgoingQueue.push({ jid, text });
@@ -280,10 +276,7 @@ export class SlackChannel implements Channel {
       while (this.outgoingQueue.length > 0) {
         const item = this.outgoingQueue.shift()!;
         const channelId = item.jid.replace(/^slack:/, '');
-        await this.app.client.chat.postMessage({
-          channel: channelId,
-          text: item.text,
-        });
+        await this.sendSlackPayload(item.jid, channelId, item.text);
         logger.info(
           { jid: item.jid, length: item.text.length },
           'Queued Slack message sent',
@@ -292,5 +285,146 @@ export class SlackChannel implements Channel {
     } finally {
       this.flushing = false;
     }
+  }
+
+  private async sendSlackPayload(
+    jid: string,
+    channelId: string,
+    text: string,
+  ): Promise<void> {
+    const workspacePdfPaths = this.extractWorkspaceGroupPdfPaths(text);
+    if (workspacePdfPaths.length === 0) {
+      await this.postTextInChunks(channelId, text);
+      return;
+    }
+
+    const uploadedFileNames = await this.uploadWorkspaceGroupPdfs(
+      jid,
+      channelId,
+      workspacePdfPaths,
+    );
+
+    if (uploadedFileNames.length > 0) {
+      await this.postTextInChunks(
+        channelId,
+        this.formatUploadedFileMessage(uploadedFileNames),
+      );
+      return;
+    }
+
+    await this.postTextInChunks(
+      channelId,
+      'PDF 已生成，但上传失败。请稍后重试。',
+    );
+  }
+
+  private async postTextInChunks(
+    channelId: string,
+    text: string,
+  ): Promise<void> {
+    if (text.length <= MAX_MESSAGE_LENGTH) {
+      await this.app.client.chat.postMessage({ channel: channelId, text });
+      return;
+    }
+
+    for (let i = 0; i < text.length; i += MAX_MESSAGE_LENGTH) {
+      await this.app.client.chat.postMessage({
+        channel: channelId,
+        text: text.slice(i, i + MAX_MESSAGE_LENGTH),
+      });
+    }
+  }
+
+  private formatUploadedFileMessage(fileNames: string[]): string {
+    const uniqueNames = [...new Set(fileNames)];
+    if (uniqueNames.length === 1) {
+      return `已上传文件：${uniqueNames[0]}`;
+    }
+    return `已上传文件：\n${uniqueNames.map((name) => `• ${name}`).join('\n')}`;
+  }
+
+  private extractWorkspaceGroupPdfPaths(text: string): string[] {
+    const paths = new Set<string>();
+    for (const match of text.matchAll(WORKSPACE_GROUP_PDF_RE)) {
+      const p = match[1];
+      if (p) paths.add(p);
+    }
+    return [...paths];
+  }
+
+  private resolveHostPathFromWorkspacePath(
+    jid: string,
+    workspacePath: string,
+  ): string | undefined {
+    const group = this.opts.registeredGroups()[jid];
+    if (!group) return undefined;
+
+    const normalized = path.posix.normalize(workspacePath);
+    const prefix = '/workspace/group/';
+    if (!normalized.startsWith(prefix)) return undefined;
+
+    const relativePath = normalized.slice(prefix.length);
+    if (
+      !relativePath ||
+      relativePath.startsWith('../') ||
+      relativePath.includes('/../')
+    ) {
+      return undefined;
+    }
+
+    const groupDir = resolveGroupFolderPath(group.folder);
+    return path.resolve(groupDir, relativePath);
+  }
+
+  private async uploadWorkspaceGroupPdfs(
+    jid: string,
+    channelId: string,
+    workspacePdfPaths: string[],
+  ): Promise<string[]> {
+    const uploaded: string[] = [];
+
+    for (const workspacePath of workspacePdfPaths) {
+      const hostPath = this.resolveHostPathFromWorkspacePath(
+        jid,
+        workspacePath,
+      );
+      if (!hostPath) {
+        logger.warn(
+          { jid, workspacePath },
+          'Could not resolve workspace PDF path for Slack upload',
+        );
+        continue;
+      }
+
+      if (!fs.existsSync(hostPath) || !fs.statSync(hostPath).isFile()) {
+        logger.warn(
+          { jid, workspacePath, hostPath },
+          'Referenced PDF does not exist on host, skipping Slack upload',
+        );
+        continue;
+      }
+
+      const fileName = path.basename(hostPath);
+      try {
+        await this.app.client.files.uploadV2({
+          channel_id: channelId,
+          file: fs.createReadStream(hostPath),
+          filename: fileName,
+          title: fileName,
+        });
+        uploaded.push(fileName);
+        logger.info(
+          { jid, workspacePath, hostPath, fileName },
+          'Uploaded PDF to Slack',
+        );
+      } catch (err) {
+        logger.warn(
+          { jid, workspacePath, hostPath, err },
+          'Failed to upload PDF to Slack',
+        );
+      }
+    }
+
+    return uploaded;
   }
 }

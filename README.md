@@ -114,7 +114,8 @@ Skills we'd like to see:
 ## Requirements
 
 - macOS or Linux
-- Node.js 20+
+- Node.js 20+ (20.x recommended; CI baseline)
+  - Node 22+ can hit filesystem edge cases on some setups (for example `filesystem::equivalent`). If that happens, switch to Node 20.x and restart NanoClaw.
 - [Claude Code](https://claude.ai/download)
 - [Apple Container](https://github.com/apple/container) (macOS) or [Docker](https://docker.com/products/docker-desktop) (macOS/Linux)
 

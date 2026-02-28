@@ -3,8 +3,23 @@
 
 FROM node:22-slim
 
-# Install system dependencies for Chromium
-RUN apt-get update && apt-get install -y \
+# Switch to a China mirror for faster package downloads, then install deps.
+RUN set -eux; \
+    sources_file=/etc/apt/sources.list.d/debian.sources; \
+    if [ ! -f "$sources_file" ]; then sources_file=/etc/apt/sources.list; fi; \
+    sed -i 's|https://mirrors.tuna.tsinghua.edu.cn/debian-security|http://mirrors.tuna.tsinghua.edu.cn/debian-security|g; s|https://mirrors.tuna.tsinghua.edu.cn/debian|http://mirrors.tuna.tsinghua.edu.cn/debian|g; s|http://deb.debian.org/debian-security|http://mirrors.tuna.tsinghua.edu.cn/debian-security|g; s|http://deb.debian.org/debian|http://mirrors.tuna.tsinghua.edu.cn/debian|g' "$sources_file"; \
+    if ! apt-get update \
+      -o Acquire::Retries=5 \
+      -o Acquire::http::Timeout=30 \
+      -o Acquire::https::Timeout=30; then \
+      echo "Mirror update failed, falling back to deb.debian.org"; \
+      sed -i 's|http://mirrors.tuna.tsinghua.edu.cn/debian-security|http://deb.debian.org/debian-security|g; s|http://mirrors.tuna.tsinghua.edu.cn/debian|http://deb.debian.org/debian|g' "$sources_file"; \
+      apt-get update \
+        -o Acquire::Retries=5 \
+        -o Acquire::http::Timeout=30 \
+        -o Acquire::https::Timeout=30; \
+    fi; \
+    apt-get install -y --no-install-recommends \
     chromium \
     fonts-liberation \
     fonts-noto-color-emoji \
@@ -23,6 +38,10 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    python3-pip \
+    python3-venv \
+    poppler-utils \
+    qpdf \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser
@@ -31,6 +50,21 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Install agent-browser and claude-code globally
 RUN npm install -g agent-browser @anthropic-ai/claude-code
+
+# Python deps for PDF skill (PEP 668-safe via virtualenv)
+RUN set -eux; \
+    python3 -m venv /opt/pydeps; \
+    PIP_OPTS="--no-cache-dir --retries 5 --timeout 60"; \
+    MIRROR_OPTS="-i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn"; \
+    if ! /opt/pydeps/bin/pip install $PIP_OPTS $MIRROR_OPTS --upgrade pip setuptools wheel; then \
+      echo "PyPI mirror failed, falling back to default index"; \
+      /opt/pydeps/bin/pip install $PIP_OPTS --upgrade pip setuptools wheel; \
+    fi; \
+    if ! /opt/pydeps/bin/pip install $PIP_OPTS $MIRROR_OPTS reportlab pypdf pdfplumber pandas openpyxl; then \
+      echo "PyPI mirror failed for deps, falling back to default index"; \
+      /opt/pydeps/bin/pip install $PIP_OPTS reportlab pypdf pdfplumber pandas openpyxl; \
+    fi
+ENV PATH="/opt/pydeps/bin:${PATH}"
 
 # Create app directory
 WORKDIR /app

@@ -55,6 +55,99 @@ interface VolumeMount {
   readonly: boolean;
 }
 
+function pathExistsIncludingSymlink(targetPath: string): boolean {
+  try {
+    fs.lstatSync(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolvePathForComparison(candidatePath: string): string {
+  const absolutePath = path.resolve(candidatePath);
+  if (pathExistsIncludingSymlink(absolutePath)) {
+    const stat = fs.lstatSync(absolutePath);
+    if (stat.isSymbolicLink()) {
+      const target = fs.readlinkSync(absolutePath);
+      const resolvedTarget = path.resolve(path.dirname(absolutePath), target);
+      return fs.realpathSync(resolvedTarget);
+    }
+    return fs.realpathSync(absolutePath);
+  }
+
+  const parent = path.dirname(absolutePath);
+  if (parent === absolutePath) return absolutePath;
+  return path.resolve(
+    resolvePathForComparison(parent),
+    path.basename(absolutePath),
+  );
+}
+
+function arePathsEquivalent(pathA: string, pathB: string): boolean {
+  const absA = path.resolve(pathA);
+  const absB = path.resolve(pathB);
+  if (absA === absB) return true;
+  try {
+    const resolvedA = resolvePathForComparison(absA);
+    const resolvedB = resolvePathForComparison(absB);
+    return resolvedA === resolvedB;
+  } catch {
+    return false;
+  }
+}
+
+function copyDirDereferenced(srcDir: string, dstDir: string): void {
+  const srcStat = fs.lstatSync(srcDir);
+  if (srcStat.isSymbolicLink()) {
+    const resolved = fs.realpathSync(srcDir);
+    copyDirDereferenced(resolved, dstDir);
+    return;
+  }
+  if (!srcStat.isDirectory()) {
+    throw new Error(`Skill sync source is not a directory: ${srcDir}`);
+  }
+
+  fs.mkdirSync(dstDir, { recursive: true });
+  for (const entryName of fs.readdirSync(srcDir)) {
+    const srcEntry = path.join(srcDir, entryName);
+    const dstEntry = path.join(dstDir, entryName);
+    const entryStat = fs.lstatSync(srcEntry);
+
+    if (entryStat.isSymbolicLink()) {
+      const resolved = fs.realpathSync(srcEntry);
+      const resolvedStat = fs.statSync(resolved);
+      if (resolvedStat.isDirectory()) {
+        copyDirDereferenced(resolved, dstEntry);
+      } else if (resolvedStat.isFile()) {
+        fs.mkdirSync(path.dirname(dstEntry), { recursive: true });
+        fs.copyFileSync(resolved, dstEntry);
+      } else {
+        logger.warn(
+          { srcEntry, resolved },
+          'Skipping unsupported symlink target during skill sync',
+        );
+      }
+      continue;
+    }
+
+    if (entryStat.isDirectory()) {
+      copyDirDereferenced(srcEntry, dstEntry);
+      continue;
+    }
+    if (entryStat.isFile()) {
+      fs.mkdirSync(path.dirname(dstEntry), { recursive: true });
+      fs.copyFileSync(srcEntry, dstEntry);
+      continue;
+    }
+
+    logger.warn(
+      { srcEntry },
+      'Skipping unsupported filesystem entry during skill sync',
+    );
+  }
+}
+
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
@@ -138,11 +231,34 @@ function buildVolumeMounts(
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
   const skillsDst = path.join(groupSessionsDir, 'skills');
   if (fs.existsSync(skillsSrc)) {
+    fs.mkdirSync(skillsDst, { recursive: true });
     for (const skillDir of fs.readdirSync(skillsSrc)) {
       const srcDir = path.join(skillsSrc, skillDir);
       if (!fs.statSync(srcDir).isDirectory()) continue;
       const dstDir = path.join(skillsDst, skillDir);
-      fs.cpSync(srcDir, dstDir, { recursive: true });
+      let copySrc = srcDir;
+      try {
+        // Resolve source symlinks up front (skills CLI often creates them).
+        // This avoids host-dependent links in group-local sessions.
+        copySrc = fs.realpathSync(srcDir);
+      } catch {
+        // Fall back to the original path if realpath fails.
+      }
+
+      if (arePathsEquivalent(copySrc, dstDir)) {
+        logger.warn(
+          { skillDir, srcDir: copySrc, dstDir },
+          'Skipping skill sync because source and destination are equivalent',
+        );
+        continue;
+      }
+
+      // Remove stale destination path first (especially old symlinks) to
+      // avoid EEXIST on repeated syncs.
+      if (pathExistsIncludingSymlink(dstDir)) {
+        fs.rmSync(dstDir, { recursive: true, force: true });
+      }
+      copyDirDereferenced(copySrc, dstDir);
     }
   }
   mounts.push({

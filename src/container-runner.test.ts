@@ -40,6 +40,11 @@ vi.mock('fs', async () => {
       readFileSync: vi.fn(() => ''),
       readdirSync: vi.fn(() => []),
       statSync: vi.fn(() => ({ isDirectory: () => false })),
+      lstatSync: vi.fn(() => ({ isDirectory: () => false })),
+      realpathSync: vi.fn((p: string) => p),
+      readlinkSync: vi.fn(() => ''),
+      cpSync: vi.fn(),
+      rmSync: vi.fn(),
       copyFileSync: vi.fn(),
     },
   };
@@ -86,6 +91,7 @@ vi.mock('child_process', async () => {
 });
 
 import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import { logger } from './logger.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -110,8 +116,17 @@ function emitOutputMarker(
   proc.stdout.push(`${OUTPUT_START_MARKER}\n${json}\n${OUTPUT_END_MARKER}\n`);
 }
 
+function statFor(kind: 'dir' | 'file' | 'symlink') {
+  return {
+    isDirectory: () => kind === 'dir',
+    isFile: () => kind === 'file',
+    isSymbolicLink: () => kind === 'symlink',
+  };
+}
+
 describe('container-runner timeout behavior', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     vi.useFakeTimers();
     fakeProc = createFakeProcess();
   });
@@ -205,5 +220,228 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+
+  it('removes existing skill destination before sync copy', async () => {
+    const fsMod = (await import('fs')).default as unknown as {
+      existsSync: ReturnType<typeof vi.fn>;
+      readdirSync: ReturnType<typeof vi.fn>;
+      statSync: ReturnType<typeof vi.fn>;
+      lstatSync: ReturnType<typeof vi.fn>;
+      realpathSync: ReturnType<typeof vi.fn>;
+      readlinkSync: ReturnType<typeof vi.fn>;
+      copyFileSync: ReturnType<typeof vi.fn>;
+      cpSync: ReturnType<typeof vi.fn>;
+      rmSync: ReturnType<typeof vi.fn>;
+    };
+
+    fsMod.existsSync.mockImplementation((p: string) => {
+      if (p.endsWith('/container/skills')) return true;
+      if (p.endsWith('/container/skills/web-search')) return true;
+      return false;
+    });
+    fsMod.readdirSync.mockImplementation((p: string) => {
+      if (p.endsWith('/container/skills')) return ['web-search'];
+      if (p.endsWith('/container/skills/web-search')) return ['SKILL.md'];
+      return [];
+    });
+    fsMod.statSync.mockImplementation((p: string) =>
+      p.endsWith('/web-search') ? statFor('dir') : statFor('file'),
+    );
+    fsMod.lstatSync.mockImplementation((p: string) => {
+      if (p.endsWith('/.claude/skills/web-search')) {
+        return statFor('dir');
+      }
+      if (p.endsWith('/container/skills/web-search')) return statFor('dir');
+      if (p.endsWith('/container/skills/web-search/SKILL.md'))
+        return statFor('file');
+      throw new Error('ENOENT');
+    });
+    fsMod.realpathSync.mockImplementation((p: string) => p);
+
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      undefined,
+    );
+
+    // Force completion; this test asserts setup-time sync side effects.
+    fakeProc.emit('close', 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+
+    expect(fsMod.rmSync).toHaveBeenCalledWith(
+      expect.stringMatching(/\.claude\/skills\/web-search$/),
+      { recursive: true, force: true },
+    );
+    expect(fsMod.copyFileSync).toHaveBeenCalledWith(
+      expect.stringMatching(/container\/skills\/web-search\/SKILL\.md$/),
+      expect.stringMatching(/\.claude\/skills\/web-search\/SKILL\.md$/),
+    );
+    expect(fsMod.cpSync).not.toHaveBeenCalled();
+  });
+
+  it('removes destination symlink before skill sync copy', async () => {
+    const fsMod = (await import('fs')).default as unknown as {
+      existsSync: ReturnType<typeof vi.fn>;
+      readdirSync: ReturnType<typeof vi.fn>;
+      statSync: ReturnType<typeof vi.fn>;
+      lstatSync: ReturnType<typeof vi.fn>;
+      realpathSync: ReturnType<typeof vi.fn>;
+      readlinkSync: ReturnType<typeof vi.fn>;
+      copyFileSync: ReturnType<typeof vi.fn>;
+      rmSync: ReturnType<typeof vi.fn>;
+    };
+
+    fsMod.existsSync.mockImplementation(
+      (p: string) =>
+        p.endsWith('/container/skills') ||
+        p.endsWith('/container/skills/web-search'),
+    );
+    fsMod.readdirSync.mockImplementation((p: string) => {
+      if (p.endsWith('/container/skills')) return ['web-search'];
+      if (p.endsWith('/container/skills/web-search')) return ['SKILL.md'];
+      return [];
+    });
+    fsMod.statSync.mockImplementation((p: string) =>
+      p.endsWith('/web-search') ? statFor('dir') : statFor('file'),
+    );
+    fsMod.lstatSync.mockImplementation((p: string) => {
+      if (p.endsWith('/.claude/skills/web-search')) return statFor('symlink');
+      if (p.endsWith('/container/skills/web-search')) return statFor('dir');
+      if (p.endsWith('/container/skills/web-search/SKILL.md'))
+        return statFor('file');
+      throw new Error('ENOENT');
+    });
+    fsMod.readlinkSync.mockImplementation((p: string) =>
+      p.endsWith('/.claude/skills/web-search') ? '/tmp/old-web-search' : '',
+    );
+    fsMod.realpathSync.mockImplementation((p: string) => p);
+
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      undefined,
+    );
+
+    fakeProc.emit('close', 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+
+    expect(fsMod.rmSync).toHaveBeenCalledWith(
+      expect.stringMatching(/\.claude\/skills\/web-search$/),
+      { recursive: true, force: true },
+    );
+    expect(fsMod.copyFileSync).toHaveBeenCalledWith(
+      expect.stringMatching(/container\/skills\/web-search\/SKILL\.md$/),
+      expect.stringMatching(/\.claude\/skills\/web-search\/SKILL\.md$/),
+    );
+  });
+
+  it('copies source skill symlink target content', async () => {
+    const fsMod = (await import('fs')).default as unknown as {
+      existsSync: ReturnType<typeof vi.fn>;
+      readdirSync: ReturnType<typeof vi.fn>;
+      statSync: ReturnType<typeof vi.fn>;
+      lstatSync: ReturnType<typeof vi.fn>;
+      realpathSync: ReturnType<typeof vi.fn>;
+      copyFileSync: ReturnType<typeof vi.fn>;
+    };
+
+    fsMod.existsSync.mockImplementation(
+      (p: string) =>
+        p.endsWith('/container/skills') ||
+        p.endsWith('/container/skills/web-search'),
+    );
+    fsMod.readdirSync.mockImplementation((p: string) => {
+      if (p.endsWith('/container/skills')) return ['web-search'];
+      if (p.endsWith('/tmp/real/web-search')) return ['SKILL.md'];
+      return [];
+    });
+    fsMod.statSync.mockImplementation((p: string) =>
+      p.endsWith('/web-search') ? statFor('dir') : statFor('file'),
+    );
+    fsMod.lstatSync.mockImplementation((p: string) => {
+      if (p.endsWith('/tmp/real/web-search')) return statFor('dir');
+      if (p.endsWith('/tmp/real/web-search/SKILL.md')) return statFor('file');
+      throw new Error('ENOENT');
+    });
+    fsMod.realpathSync.mockImplementation((p: string) =>
+      p.endsWith('/container/skills/web-search') ? '/tmp/real/web-search' : p,
+    );
+
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      undefined,
+    );
+
+    fakeProc.emit('close', 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+
+    expect(fsMod.copyFileSync).toHaveBeenCalledWith(
+      '/tmp/real/web-search/SKILL.md',
+      expect.stringMatching(/\.claude\/skills\/web-search\/SKILL\.md$/),
+    );
+  });
+
+  it('skips skill sync when source and destination are equivalent', async () => {
+    const fsMod = (await import('fs')).default as unknown as {
+      existsSync: ReturnType<typeof vi.fn>;
+      readdirSync: ReturnType<typeof vi.fn>;
+      statSync: ReturnType<typeof vi.fn>;
+      lstatSync: ReturnType<typeof vi.fn>;
+      realpathSync: ReturnType<typeof vi.fn>;
+      copyFileSync: ReturnType<typeof vi.fn>;
+      rmSync: ReturnType<typeof vi.fn>;
+    };
+
+    fsMod.existsSync.mockImplementation(
+      (p: string) =>
+        p.endsWith('/container/skills') ||
+        p.endsWith('/container/skills/web-search'),
+    );
+    fsMod.readdirSync.mockImplementation((p: string) => {
+      if (p.endsWith('/container/skills')) return ['web-search'];
+      return [];
+    });
+    fsMod.statSync.mockImplementation((p: string) =>
+      p.endsWith('/web-search') ? statFor('dir') : statFor('file'),
+    );
+    fsMod.lstatSync.mockImplementation((p: string) => {
+      if (p.endsWith('/.claude/skills/web-search')) return statFor('dir');
+      if (p.endsWith('/same/web-search')) return statFor('dir');
+      throw new Error('ENOENT');
+    });
+    fsMod.realpathSync.mockImplementation((p: string) =>
+      p.endsWith('/container/skills/web-search') ||
+      p.endsWith('/.claude/skills/web-search')
+        ? '/same/web-search'
+        : p,
+    );
+
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      undefined,
+    );
+
+    fakeProc.emit('close', 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+
+    expect(fsMod.rmSync).not.toHaveBeenCalled();
+    expect(fsMod.copyFileSync).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skillDir: 'web-search',
+      }),
+      expect.stringContaining('equivalent'),
+    );
   });
 });

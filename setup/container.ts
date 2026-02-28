@@ -98,14 +98,35 @@ export async function run(args: string[]): Promise<void> {
   const buildCmd =
     runtime === 'apple-container' ? 'container build' : 'docker build';
   const runCmd = runtime === 'apple-container' ? 'container' : 'docker';
+  const buildCpus = process.env.NANOCLAW_BUILD_CPUS || '8';
+  const buildMemory = process.env.NANOCLAW_BUILD_MEMORY || '8G';
+  const buildProgress = process.env.NANOCLAW_BUILD_PROGRESS || '';
+  const buildResourceArgs =
+    runtime === 'apple-container'
+      ? ` --cpus ${buildCpus} --memory ${buildMemory}`
+      : '';
+  const buildProgressArgs = buildProgress
+    ? ` --progress ${buildProgress}`
+    : '';
+  const streamBuildOutput = Boolean(buildProgress);
 
   // Build
   let buildOk = false;
-  logger.info({ runtime }, 'Building container');
+  logger.info(
+    {
+      runtime,
+      ...(runtime === 'apple-container'
+        ? { buildCpus, buildMemory }
+        : undefined),
+      ...(buildProgress ? { buildProgress } : undefined),
+      streamBuildOutput,
+    },
+    'Building container',
+  );
   try {
-    execSync(`${buildCmd} -t ${image} .`, {
+    execSync(`${buildCmd}${buildResourceArgs}${buildProgressArgs} -t ${image} .`, {
       cwd: path.join(projectRoot, 'container'),
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: streamBuildOutput ? 'inherit' : ['ignore', 'pipe', 'pipe'],
     });
     buildOk = true;
     logger.info('Container build succeeded');
@@ -134,6 +155,10 @@ export async function run(args: string[]): Promise<void> {
   emitStatus('SETUP_CONTAINER', {
     RUNTIME: runtime,
     IMAGE: image,
+    ...(runtime === 'apple-container'
+      ? { BUILD_CPUS: buildCpus, BUILD_MEMORY: buildMemory }
+      : undefined),
+    ...(buildProgress ? { BUILD_PROGRESS: buildProgress } : undefined),
     BUILD_OK: buildOk,
     TEST_OK: testOk,
     STATUS: status,
