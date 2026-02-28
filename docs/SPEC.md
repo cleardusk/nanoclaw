@@ -227,7 +227,7 @@ Additional mounts appear at `/workspace/extra/{containerPath}` inside the contai
 
 ### Claude Authentication
 
-Configure authentication in a `.env` file in the project root. Two options:
+Configure authentication in either project `.env` or `~/.claude/settings.json`.
 
 **Option 1: Claude Subscription (OAuth token)**
 ```bash
@@ -240,7 +240,24 @@ The token can be extracted from `~/.claude/.credentials.json` if you're logged i
 ANTHROPIC_API_KEY=sk-ant-api03-...
 ```
 
-Only the authentication variables (`CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY`) are extracted from `.env` and written to `data/env/env`, then mounted into the container at `/workspace/env-dir/env` and sourced by the entrypoint script. This ensures other environment variables in `.env` are not exposed to the agent. This workaround is needed because some container runtimes lose `-e` environment variables when using `-i` (interactive mode with piped stdin).
+**Option 3: cc-switch / provider gateway config**
+Set Claude Code env vars in `~/.claude/settings.json` (for example Minimax via Anthropic-compatible gateway):
+```json
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "...",
+    "ANTHROPIC_BASE_URL": "https://api.minimaxi.com/anthropic",
+    "ANTHROPIC_MODEL": "MiniMax-M2.5"
+  }
+}
+```
+
+NanoClaw merges auth/runtime vars with this precedence:
+1. `~/.claude/settings.json` `env.*`
+2. project `.env`
+3. process environment variables
+
+Only a strict allowlist of Claude SDK auth/runtime variables is passed into the container. This avoids exposing unrelated project env vars while still supporting OAuth/API key and cc-switch-style providers.
 
 ### Changing the Assistant Name
 
