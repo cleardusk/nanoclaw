@@ -6,9 +6,11 @@ import {
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
+  SLACK_ONLY,
   TRIGGER_PATTERN,
 } from './config.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
+import { SlackChannel } from './channels/slack.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -41,6 +43,7 @@ import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { readEnvFile } from './env.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -51,7 +54,8 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
-let whatsapp: WhatsAppChannel;
+let whatsapp: WhatsAppChannel | undefined;
+let slack: SlackChannel | undefined;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
@@ -475,9 +479,28 @@ async function main(): Promise<void> {
   };
 
   // Create and connect channels
-  whatsapp = new WhatsAppChannel(channelOpts);
-  channels.push(whatsapp);
-  await whatsapp.connect();
+  const slackEnv = readEnvFile(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']);
+  const hasSlackTokens = Boolean(
+    slackEnv.SLACK_BOT_TOKEN && slackEnv.SLACK_APP_TOKEN,
+  );
+
+  if (!SLACK_ONLY) {
+    whatsapp = new WhatsAppChannel(channelOpts);
+    channels.push(whatsapp);
+    await whatsapp.connect();
+  }
+
+  if (hasSlackTokens) {
+    slack = new SlackChannel(channelOpts);
+    channels.push(slack);
+    await slack.connect();
+  }
+
+  if (channels.length === 0) {
+    throw new Error(
+      'No channels configured. Configure WhatsApp auth or set SLACK_BOT_TOKEN and SLACK_APP_TOKEN in .env',
+    );
+  }
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
@@ -504,8 +527,10 @@ async function main(): Promise<void> {
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: (force) =>
-      whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
+    syncGroupMetadata: async (force) => {
+      if (whatsapp) await whatsapp.syncGroupMetadata(force);
+      if (slack) await slack.syncChannelMetadata();
+    },
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
