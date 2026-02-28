@@ -113,7 +113,9 @@ export class SlackChannel implements Channel {
       senderName = ASSISTANT_NAME;
     } else {
       senderName =
-        (await this.resolveUserName(event.user || '')) || event.user || 'unknown';
+        (await this.resolveUserName(event.user || '')) ||
+        event.user ||
+        'unknown';
     }
 
     // Translate Slack <@UBOTID> mentions into TRIGGER_PATTERN format.
