@@ -172,7 +172,9 @@ export class SlackChannel implements Channel {
         user: typeof event.user === 'string' ? event.user : undefined,
         bot_id: typeof event.bot_id === 'string' ? event.bot_id : undefined,
         channel_type:
-          typeof event.channel_type === 'string' ? event.channel_type : undefined,
+          typeof event.channel_type === 'string'
+            ? event.channel_type
+            : undefined,
       };
     }
 
@@ -193,7 +195,9 @@ export class SlackChannel implements Channel {
         user: typeof nested.user === 'string' ? nested.user : undefined,
         bot_id: typeof nested.bot_id === 'string' ? nested.bot_id : undefined,
         channel_type:
-          typeof event.channel_type === 'string' ? event.channel_type : undefined,
+          typeof event.channel_type === 'string'
+            ? event.channel_type
+            : undefined,
       };
     }
 
