@@ -1,0 +1,5 @@
+.DS_Store
+**/.DS_Store
+agent-runner/node_modules/
+skills/**/__pycache__/
+skills/**/*.pyc

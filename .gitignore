@@ -31,5 +31,12 @@ groups/global/*
 
 # Skills system (local per-installation state)
 .nanoclaw/
+/.agent/
+/.agents/
+/skills/
+/skills-lock.json
+
+# Local Claude machine settings
+/.claude/settings.local.json
 
 agents-sdk-docs
