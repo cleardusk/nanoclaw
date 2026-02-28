@@ -13,6 +13,7 @@ import Database from 'better-sqlite3';
 
 import { hasConfiguredAgentCredentials } from '../src/agent-auth.js';
 import { STORE_DIR } from '../src/config.js';
+import { readEnvFile } from '../src/env.js';
 import { logger } from '../src/logger.js';
 import {
   getPlatform,
@@ -107,6 +108,22 @@ export async function run(_args: string[]): Promise<void> {
     whatsappAuth = 'authenticated';
   }
 
+  // 4b. Check Slack auth config (for SLACK_ONLY mode)
+  const slackEnv = readEnvFile([
+    'SLACK_ONLY',
+    'SLACK_BOT_TOKEN',
+    'SLACK_APP_TOKEN',
+  ]);
+  const slackOnly =
+    (process.env.SLACK_ONLY || slackEnv.SLACK_ONLY || '').toLowerCase() ===
+    'true';
+  const slackConfigured = Boolean(
+    (process.env.SLACK_BOT_TOKEN || slackEnv.SLACK_BOT_TOKEN) &&
+      (process.env.SLACK_APP_TOKEN || slackEnv.SLACK_APP_TOKEN),
+  );
+  const channelAuthReady =
+    whatsappAuth !== 'not_found' || (slackOnly && slackConfigured);
+
   // 5. Check registered groups (using better-sqlite3, not sqlite3 CLI)
   let registeredGroups = 0;
   const dbPath = path.join(STORE_DIR, 'messages.db');
@@ -137,7 +154,7 @@ export async function run(_args: string[]): Promise<void> {
   const status =
     service === 'running' &&
     credentials !== 'missing' &&
-    whatsappAuth !== 'not_found' &&
+    channelAuthReady &&
     registeredGroups > 0
       ? 'success'
       : 'failed';
@@ -149,6 +166,8 @@ export async function run(_args: string[]): Promise<void> {
     CONTAINER_RUNTIME: containerRuntime,
     CREDENTIALS: credentials,
     WHATSAPP_AUTH: whatsappAuth,
+    SLACK_ONLY: slackOnly,
+    SLACK_CONFIG: slackConfigured ? 'configured' : 'missing',
     REGISTERED_GROUPS: registeredGroups,
     MOUNT_ALLOWLIST: mountAllowlist,
     STATUS: status,
