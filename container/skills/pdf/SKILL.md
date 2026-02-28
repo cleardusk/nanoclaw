@@ -168,6 +168,88 @@ doc.build([Paragraph("中文标题", styles["Title"]), Paragraph("中文正文�
 
 If the output contains CJK text, set the CJK font on **all** text-bearing styles/elements (title/body/table cells), not only one line.
 
+#### Mixed Chinese-English Code Blocks (Critical)
+
+If a code block contains any CJK characters, do **not** use a single `Courier` style for the whole line. `Courier` is WinAnsi-only and Chinese text will render as black boxes.
+
+Rules:
+- Pure ASCII code lines: `Courier` is fine.
+- Mixed CJK + ASCII code lines: use `STSong-Light` as base, and render ASCII chunks with `Courier`, CJK chunks with `STSong-Light`.
+- Never set `fontName="Courier"` for a code style that can contain Chinese text.
+
+Safe example:
+```python
+import re
+from html import escape
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.platypus import Paragraph
+
+CJK_RE = re.compile(r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]")
+
+def render_mixed_code_line(line: str) -> str:
+    # Keep indentation/spacing and split CJK vs non-CJK chunks.
+    parts = re.split(r"([\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]+)", line)
+    out = []
+    for part in parts:
+        if not part:
+            continue
+        escaped = escape(part, quote=False).replace(" ", "&nbsp;")
+        font = "STSong-Light" if CJK_RE.search(part) else "Courier"
+        out.append(f'<font name="{font}">{escaped}</font>')
+    return "".join(out)
+
+code_style = ParagraphStyle(
+    "CodeMixed",
+    parent=styles["Normal"],
+    fontName="STSong-Light",  # safe default for mixed lines
+    fontSize=10,
+    leading=13,
+)
+
+for line in code_lines:
+    story.append(Paragraph(render_mixed_code_line(line), code_style))
+```
+
+#### Code Block Must Be Visually Wrapped
+
+If the user asks for a "code block", do not output plain paragraphs only. Wrap it in a visible container (background + border + padding), otherwise it looks like normal body text.
+
+Recommended pattern (Platypus):
+- Use `Preformatted` to preserve indentation and line breaks.
+- Put `Preformatted` inside a one-cell `Table`.
+- Apply `TableStyle` with `BACKGROUND`, `BOX`, and paddings.
+
+```python
+from reportlab.lib import colors
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.platypus import Preformatted, Table, TableStyle
+
+code_text = "\\n".join(code_lines)
+code_text_style = ParagraphStyle(
+    "CodeText",
+    parent=styles["Normal"],
+    fontName="STSong-Light",  # safe when code contains Chinese
+    fontSize=10,
+    leading=14,
+)
+
+code_pre = Preformatted(code_text, code_text_style, dedent=0)
+code_box = Table([[code_pre]], colWidths=[doc.width])
+code_box.setStyle(
+    TableStyle(
+        [
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5F5F5")),
+            ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#BDBDBD")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]
+    )
+)
+story.append(code_box)
+```
+
 #### Basic PDF Creation
 ```python
 from reportlab.lib.pagesizes import letter

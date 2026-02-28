@@ -165,6 +165,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   const prompt = formatMessages(missedMessages);
+  const latestMessage = missedMessages[missedMessages.length - 1];
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -177,6 +178,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     { group: group.name, messageCount: missedMessages.length },
     'Processing messages',
   );
+
+  channel
+    .setProcessingIndicator?.(chatJid, latestMessage.id, true)
+    ?.catch((err) =>
+      logger.warn({ chatJid, err }, 'Failed to set processing indicator'),
+    );
 
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -413,6 +420,15 @@ async function startMessageLoop(): Promise<void> {
               .setTyping?.(chatJid, true)
               ?.catch((err) =>
                 logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
+              );
+            const latestMessage = messagesToSend[messagesToSend.length - 1];
+            channel
+              .setProcessingIndicator?.(chatJid, latestMessage.id, true)
+              ?.catch((err) =>
+                logger.warn(
+                  { chatJid, err },
+                  'Failed to set processing indicator',
+                ),
               );
           } else {
             // No active container — enqueue for a new one

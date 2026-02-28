@@ -50,6 +50,10 @@ vi.mock('@slack/bolt', () => ({
       files: {
         uploadV2: vi.fn().mockResolvedValue(undefined),
       },
+      reactions: {
+        add: vi.fn().mockResolvedValue(undefined),
+        remove: vi.fn().mockResolvedValue(undefined),
+      },
       conversations: {
         list: vi.fn().mockResolvedValue({
           channels: [],
@@ -130,6 +134,31 @@ function createMessageEvent(overrides: {
     thread_ts: overrides.threadTs,
     subtype: overrides.subtype,
     bot_id: overrides.botId,
+  };
+}
+
+function createMessageRepliedEvent(overrides: {
+  channel?: string;
+  channelType?: string;
+  outerTs?: string;
+  replyTs?: string;
+  user?: string;
+  text?: string;
+  botId?: string;
+}) {
+  return {
+    channel: overrides.channel ?? 'C0123456789',
+    channel_type: overrides.channelType ?? 'channel',
+    subtype: 'message_replied',
+    ts: overrides.outerTs ?? '1704067205.000000',
+    message: {
+      type: 'message',
+      user: overrides.user ?? 'U_USER_456',
+      text: 'text' in overrides ? overrides.text : 'Thread reply via wrapper',
+      ts: overrides.replyTs ?? '1704067201.000000',
+      bot_id: overrides.botId,
+      thread_ts: '1704067200.000000',
+    },
   };
 }
 
@@ -541,6 +570,27 @@ describe('SlackChannel', () => {
 
       expect(opts.onMessage).toHaveBeenCalled();
     });
+
+    it('handles message_replied wrapper events for thread replies', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const event = createMessageRepliedEvent({
+        text: 'Thread reply in wrapper event',
+      });
+      await triggerMessageEvent(event as any);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          id: '1704067201.000000',
+          content: 'Thread reply in wrapper event',
+          sender: 'U_USER_456',
+          is_from_me: false,
+        }),
+      );
+    });
   });
 
   // --- @mention translation ---
@@ -799,6 +849,64 @@ describe('SlackChannel', () => {
         text: 'PDF 已生成，但上传失败。请稍后重试。',
       });
       expect(currentApp().client.files.uploadV2).not.toHaveBeenCalled();
+    });
+
+    it('clears one processing reaction after successful send', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await channel.setProcessingIndicator(
+        'slack:C0123456789',
+        '1704067200.000000',
+        true,
+      );
+
+      await channel.sendMessage('slack:C0123456789', 'reply');
+
+      expect(currentApp().client.reactions.remove).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        timestamp: '1704067200.000000',
+        name: 'keyboard',
+      });
+    });
+  });
+
+  describe('processing indicator', () => {
+    it('adds processing reaction on source message', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await channel.setProcessingIndicator(
+        'slack:C0123456789',
+        '1704067200.000000',
+        true,
+      );
+
+      expect(currentApp().client.reactions.add).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        timestamp: '1704067200.000000',
+        name: 'keyboard',
+      });
+    });
+
+    it('removes processing reaction when disabled', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await channel.setProcessingIndicator(
+        'slack:C0123456789',
+        '1704067200.000000',
+        false,
+      );
+
+      expect(currentApp().client.reactions.remove).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        timestamp: '1704067200.000000',
+        name: 'keyboard',
+      });
     });
   });
 

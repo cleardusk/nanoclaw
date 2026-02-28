@@ -2,11 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { App, LogLevel } from '@slack/bolt';
-import type {
-  AppMentionEvent,
-  GenericMessageEvent,
-  BotMessageEvent,
-} from '@slack/types';
+import type { AppMentionEvent } from '@slack/types';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
@@ -25,11 +21,16 @@ import {
 const MAX_MESSAGE_LENGTH = 4000;
 const WORKSPACE_GROUP_PDF_RE = /`?(\/workspace\/group\/[^\s`"'<>]+\.pdf)`?/gi;
 
-// The message subtypes we process. Bolt delivers all subtypes via app.event('message');
-// we filter to regular messages (GenericMessageEvent, subtype undefined) and bot messages
-// (BotMessageEvent, subtype 'bot_message') so we can track our own output.
-type HandledMessageEvent = GenericMessageEvent | BotMessageEvent;
-type HandledSlackEvent = HandledMessageEvent | AppMentionEvent;
+interface InboundMessageEvent {
+  channel: string;
+  ts: string;
+  text?: string;
+  user?: string;
+  bot_id?: string;
+  channel_type?: string;
+}
+
+type HandledSlackEvent = InboundMessageEvent | AppMentionEvent;
 
 export interface SlackChannelOpts {
   onMessage: OnInboundMessage;
@@ -46,6 +47,8 @@ export class SlackChannel implements Channel {
   private outgoingQueue: Array<{ jid: string; text: string }> = [];
   private flushing = false;
   private userNameCache = new Map<string, string>();
+  private processingIndicatorsByJid = new Map<string, string[]>();
+  private processingEmoji = 'keyboard';
 
   private opts: SlackChannelOpts;
 
@@ -54,7 +57,11 @@ export class SlackChannel implements Channel {
 
     // Read tokens from .env (not process.env — keeps secrets off the environment
     // so they don't leak to child processes, matching NanoClaw's security pattern)
-    const env = readEnvFile(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']);
+    const env = readEnvFile([
+      'SLACK_BOT_TOKEN',
+      'SLACK_APP_TOKEN',
+      'SLACK_PROCESSING_EMOJI',
+    ]);
     const botToken = env.SLACK_BOT_TOKEN;
     const appToken = env.SLACK_APP_TOKEN;
 
@@ -62,6 +69,9 @@ export class SlackChannel implements Channel {
       throw new Error(
         'SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env',
       );
+    }
+    if (env.SLACK_PROCESSING_EMOJI) {
+      this.processingEmoji = env.SLACK_PROCESSING_EMOJI.trim();
     }
 
     this.app = new App({
@@ -75,16 +85,14 @@ export class SlackChannel implements Channel {
   }
 
   private setupEventHandlers(): void {
-    // Use app.event('message') instead of app.message() to capture all
-    // message subtypes including bot_message (needed to track our own output)
+    // Use app.event('message') instead of app.message() to capture all subtypes.
+    // We normalize message_replied (thread reply wrapper) into a regular message.
     this.app.event('message', async ({ event }) => {
-      // Bolt's event type is the full MessageEvent union (17+ subtypes).
-      // We filter on subtype first, then narrow to the two types we handle.
-      const subtype = (event as { subtype?: string }).subtype;
-      if (subtype && subtype !== 'bot_message') return;
-
-      // After filtering, event is either GenericMessageEvent or BotMessageEvent
-      await this.handleInboundEvent(event as HandledMessageEvent);
+      const normalized = this.normalizeInboundMessageEvent(
+        event as unknown as Record<string, unknown>,
+      );
+      if (!normalized) return;
+      await this.handleInboundEvent(normalized);
     });
 
     // In channel mentions are delivered as a dedicated app_mention event.
@@ -146,6 +154,52 @@ export class SlackChannel implements Channel {
     });
   }
 
+  private normalizeInboundMessageEvent(
+    event: Record<string, unknown>,
+  ): InboundMessageEvent | null {
+    const subtype =
+      typeof event.subtype === 'string' ? (event.subtype as string) : undefined;
+
+    // Regular messages and bot_message can be consumed directly.
+    if (!subtype || subtype === 'bot_message') {
+      if (typeof event.channel !== 'string' || typeof event.ts !== 'string') {
+        return null;
+      }
+      return {
+        channel: event.channel,
+        ts: event.ts,
+        text: typeof event.text === 'string' ? event.text : undefined,
+        user: typeof event.user === 'string' ? event.user : undefined,
+        bot_id: typeof event.bot_id === 'string' ? event.bot_id : undefined,
+        channel_type:
+          typeof event.channel_type === 'string' ? event.channel_type : undefined,
+      };
+    }
+
+    // Thread replies can arrive wrapped as subtype=message_replied with the
+    // actual user reply under event.message.
+    if (subtype === 'message_replied') {
+      const nested =
+        event.message && typeof event.message === 'object'
+          ? (event.message as Record<string, unknown>)
+          : null;
+      if (!nested) return null;
+      if (typeof event.channel !== 'string') return null;
+      if (typeof nested.ts !== 'string') return null;
+      return {
+        channel: event.channel,
+        ts: nested.ts,
+        text: typeof nested.text === 'string' ? nested.text : undefined,
+        user: typeof nested.user === 'string' ? nested.user : undefined,
+        bot_id: typeof nested.bot_id === 'string' ? nested.bot_id : undefined,
+        channel_type:
+          typeof event.channel_type === 'string' ? event.channel_type : undefined,
+      };
+    }
+
+    return null;
+  }
+
   async connect(): Promise<void> {
     await this.app.start();
 
@@ -183,6 +237,7 @@ export class SlackChannel implements Channel {
 
     try {
       await this.sendSlackPayload(jid, channelId, text);
+      await this.clearOneProcessingIndicator(jid);
 
       logger.info({ jid, length: text.length }, 'Slack message sent');
     } catch (err) {
@@ -212,6 +267,48 @@ export class SlackChannel implements Channel {
   // doesn't need channel-specific branching.
   async setTyping(_jid: string, _isTyping: boolean): Promise<void> {
     // no-op: Slack Bot API has no typing indicator endpoint
+  }
+
+  async setProcessingIndicator(
+    jid: string,
+    messageId: string,
+    isProcessing: boolean,
+  ): Promise<void> {
+    if (!this.connected) return;
+    if (!this.ownsJid(jid)) return;
+    if (!messageId) return;
+
+    const channelId = jid.replace(/^slack:/, '');
+    if (isProcessing) {
+      try {
+        await this.app.client.reactions.add({
+          channel: channelId,
+          timestamp: messageId,
+          name: this.processingEmoji,
+        });
+        this.trackProcessingIndicator(jid, messageId);
+      } catch (err) {
+        logger.debug(
+          { jid, messageId, emoji: this.processingEmoji, err },
+          'Failed to add Slack processing reaction',
+        );
+      }
+      return;
+    }
+
+    this.untrackProcessingIndicator(jid, messageId);
+    try {
+      await this.app.client.reactions.remove({
+        channel: channelId,
+        timestamp: messageId,
+        name: this.processingEmoji,
+      });
+    } catch (err) {
+      logger.debug(
+        { jid, messageId, emoji: this.processingEmoji, err },
+        'Failed to remove Slack processing reaction',
+      );
+    }
   }
 
   /**
@@ -277,6 +374,7 @@ export class SlackChannel implements Channel {
         const item = this.outgoingQueue.shift()!;
         const channelId = item.jid.replace(/^slack:/, '');
         await this.sendSlackPayload(item.jid, channelId, item.text);
+        await this.clearOneProcessingIndicator(item.jid);
         logger.info(
           { jid: item.jid, length: item.text.length },
           'Queued Slack message sent',
@@ -316,6 +414,55 @@ export class SlackChannel implements Channel {
       channelId,
       'PDF 已生成，但上传失败。请稍后重试。',
     );
+  }
+
+  private trackProcessingIndicator(jid: string, messageId: string): void {
+    const existing = this.processingIndicatorsByJid.get(jid) || [];
+    if (!existing.includes(messageId)) {
+      existing.push(messageId);
+      this.processingIndicatorsByJid.set(jid, existing);
+    }
+  }
+
+  private untrackProcessingIndicator(jid: string, messageId: string): void {
+    const existing = this.processingIndicatorsByJid.get(jid);
+    if (!existing || existing.length === 0) return;
+    const filtered = existing.filter((id) => id !== messageId);
+    if (filtered.length === 0) {
+      this.processingIndicatorsByJid.delete(jid);
+    } else {
+      this.processingIndicatorsByJid.set(jid, filtered);
+    }
+  }
+
+  private popOldestProcessingIndicator(jid: string): string | undefined {
+    const existing = this.processingIndicatorsByJid.get(jid);
+    if (!existing || existing.length === 0) return undefined;
+    const [oldest, ...rest] = existing;
+    if (rest.length === 0) {
+      this.processingIndicatorsByJid.delete(jid);
+    } else {
+      this.processingIndicatorsByJid.set(jid, rest);
+    }
+    return oldest;
+  }
+
+  private async clearOneProcessingIndicator(jid: string): Promise<void> {
+    const messageId = this.popOldestProcessingIndicator(jid);
+    if (!messageId) return;
+    const channelId = jid.replace(/^slack:/, '');
+    try {
+      await this.app.client.reactions.remove({
+        channel: channelId,
+        timestamp: messageId,
+        name: this.processingEmoji,
+      });
+    } catch (err) {
+      logger.debug(
+        { jid, messageId, emoji: this.processingEmoji, err },
+        'Failed to clear Slack processing reaction after response',
+      );
+    }
   }
 
   private async postTextInChunks(

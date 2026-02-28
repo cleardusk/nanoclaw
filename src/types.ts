@@ -87,6 +87,12 @@ export interface Channel {
   disconnect(): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
+  // Optional: message-level processing indicator (e.g., Slack reaction on source message).
+  setProcessingIndicator?(
+    jid: string,
+    messageId: string,
+    isProcessing: boolean,
+  ): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages
