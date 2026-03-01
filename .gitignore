@@ -38,5 +38,9 @@ groups/global/*
 
 # Local Claude machine settings
 /.claude/settings.local.json
+/.claude/skills/
+
+# Local temp workspace
+/tmp/
 
 agents-sdk-docs
