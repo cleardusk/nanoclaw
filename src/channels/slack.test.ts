@@ -867,7 +867,7 @@ describe('SlackChannel', () => {
       expect(currentApp().client.reactions.remove).toHaveBeenCalledWith({
         channel: 'C0123456789',
         timestamp: '1704067200.000000',
-        name: 'keyboard',
+        name: 'technologist',
       });
     });
   });
@@ -887,7 +887,7 @@ describe('SlackChannel', () => {
       expect(currentApp().client.reactions.add).toHaveBeenCalledWith({
         channel: 'C0123456789',
         timestamp: '1704067200.000000',
-        name: 'keyboard',
+        name: 'technologist',
       });
     });
 
@@ -905,7 +905,7 @@ describe('SlackChannel', () => {
       expect(currentApp().client.reactions.remove).toHaveBeenCalledWith({
         channel: 'C0123456789',
         timestamp: '1704067200.000000',
-        name: 'keyboard',
+        name: 'technologist',
       });
     });
   });

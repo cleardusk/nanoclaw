@@ -48,7 +48,7 @@ export class SlackChannel implements Channel {
   private flushing = false;
   private userNameCache = new Map<string, string>();
   private processingIndicatorsByJid = new Map<string, string[]>();
-  private processingEmoji = 'keyboard';
+  private processingEmoji = 'technologist'; // default emoji for processing indicator, can be overridden by .env
 
   private opts: SlackChannelOpts;
 
