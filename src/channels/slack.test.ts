@@ -867,8 +867,10 @@ describe('SlackChannel', () => {
 
       expect(currentApp().client.chat.postMessage).not.toHaveBeenCalled();
       expect(currentApp().client.files.uploadV2).toHaveBeenCalledTimes(2);
-      const uploadedNames = currentApp().client.files.uploadV2.mock.calls
-        .map((call: any[]) => call[0]?.filename as string | undefined)
+      const uploadedNames = currentApp()
+        .client.files.uploadV2.mock.calls.map(
+          (call: any[]) => call[0]?.filename as string | undefined,
+        )
         .filter((name: string | undefined): name is string => Boolean(name))
         .sort();
       expect(uploadedNames).toEqual(['deck.html', 'report.pdf']);
