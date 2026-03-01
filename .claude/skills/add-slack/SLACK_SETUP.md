@@ -59,6 +59,7 @@ These scopes control what the bot is allowed to do.
 | `channels:read` | List channels (for metadata sync) |
 | `groups:read` | List private channels (for metadata sync) |
 | `users:read` | Look up user display names |
+| `files:write` | Upload generated files (HTML/PDF/images/etc.) to Slack |
 
 ## Step 5: Install to Workspace
 
@@ -66,6 +67,8 @@ These scopes control what the bot is allowed to do.
 2. Click **Install to Workspace**
 3. Review the permissions and click **Allow**
 4. **Copy the Bot User OAuth Token** — it starts with `xoxb-`. Save this somewhere safe.
+
+If you add or change scopes later, Slack requires reinstalling the app to apply new permissions.
 
 ## Step 6: Configure NanoClaw
 

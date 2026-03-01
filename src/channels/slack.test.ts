@@ -802,7 +802,7 @@ describe('SlackChannel', () => {
       });
     });
 
-    it('uploads referenced /workspace/group PDF to Slack', async () => {
+    it('uploads referenced /workspace/group PDF to Slack in attachment-only mode', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
       await channel.connect();
@@ -816,15 +816,7 @@ describe('SlackChannel', () => {
         '已生成文件：`/workspace/group/report.pdf`',
       );
 
-      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
-        channel: 'C0123456789',
-        text: '已上传文件：report.pdf',
-      });
-      expect(currentApp().client.chat.postMessage).not.toHaveBeenCalledWith(
-        expect.objectContaining({
-          text: expect.stringContaining('/workspace/group/report.pdf'),
-        }),
-      );
+      expect(currentApp().client.chat.postMessage).not.toHaveBeenCalled();
       expect(currentApp().client.files.uploadV2).toHaveBeenCalledWith(
         expect.objectContaining({
           channel_id: 'C0123456789',
@@ -834,7 +826,55 @@ describe('SlackChannel', () => {
       );
     });
 
-    it('skips PDF upload when referenced file is missing', async () => {
+    it('uploads referenced /workspace/group HTML to Slack in attachment-only mode', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const hostDir = '/tmp/nanoclaw-groups/test-channel';
+      fs.mkdirSync(hostDir, { recursive: true });
+      fs.writeFileSync(`${hostDir}/report.html`, '<html>report</html>');
+
+      await channel.sendMessage(
+        'slack:C0123456789',
+        '网页：`/workspace/group/report.html`',
+      );
+
+      expect(currentApp().client.chat.postMessage).not.toHaveBeenCalled();
+      expect(currentApp().client.files.uploadV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel_id: 'C0123456789',
+          filename: 'report.html',
+          title: 'report.html',
+        }),
+      );
+    });
+
+    it('deduplicates workspace file paths and uploads each once', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const hostDir = '/tmp/nanoclaw-groups/test-channel';
+      fs.mkdirSync(hostDir, { recursive: true });
+      fs.writeFileSync(`${hostDir}/report.pdf`, 'fake pdf content');
+      fs.writeFileSync(`${hostDir}/deck.html`, '<html>deck</html>');
+
+      await channel.sendMessage(
+        'slack:C0123456789',
+        '文件：`/workspace/group/report.pdf` /workspace/group/deck.html /workspace/group/report.pdf',
+      );
+
+      expect(currentApp().client.chat.postMessage).not.toHaveBeenCalled();
+      expect(currentApp().client.files.uploadV2).toHaveBeenCalledTimes(2);
+      const uploadedNames = currentApp().client.files.uploadV2.mock.calls
+        .map((call: any[]) => call[0]?.filename as string | undefined)
+        .filter((name: string | undefined): name is string => Boolean(name))
+        .sort();
+      expect(uploadedNames).toEqual(['deck.html', 'report.pdf']);
+    });
+
+    it('shows fallback message when referenced file is missing', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
       await channel.connect();
@@ -846,9 +886,43 @@ describe('SlackChannel', () => {
 
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
         channel: 'C0123456789',
-        text: 'PDF 已生成，但上传失败。请稍后重试。',
+        text: '检测到文件路径，但上传失败。请稍后重试。',
       });
       expect(currentApp().client.files.uploadV2).not.toHaveBeenCalled();
+    });
+
+    it('rejects path traversal in /workspace/group references', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await channel.sendMessage(
+        'slack:C0123456789',
+        '文件：`/workspace/group/../secret.pdf`',
+      );
+
+      expect(currentApp().client.files.uploadV2).not.toHaveBeenCalled();
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        text: '检测到文件路径，但上传失败。请稍后重试。',
+      });
+    });
+
+    it('does not upload non /workspace/group paths', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await channel.sendMessage(
+        'slack:C0123456789',
+        '文件：/workspace/extra/report.pdf',
+      );
+
+      expect(currentApp().client.files.uploadV2).not.toHaveBeenCalled();
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        text: '文件：/workspace/extra/report.pdf',
+      });
     });
 
     it('clears one processing reaction after successful send', async () => {

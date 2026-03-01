@@ -19,7 +19,21 @@ import {
 // Slack's chat.postMessage API limits text to ~4000 characters per call.
 // Messages exceeding this are split into sequential chunks.
 const MAX_MESSAGE_LENGTH = 4000;
-const WORKSPACE_GROUP_PDF_RE = /`?(\/workspace\/group\/[^\s`"'<>]+\.pdf)`?/gi;
+const WORKSPACE_GROUP_FILE_RE = /`?(\/workspace\/group\/[^\s`"'<>]+)`?/gi;
+const SUPPORTED_WORKSPACE_UPLOAD_EXTS = new Set([
+  '.html',
+  '.htm',
+  '.pdf',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.webp',
+  '.txt',
+  '.md',
+  '.csv',
+  '.json',
+  '.zip',
+]);
 
 interface InboundMessageEvent {
   channel: string;
@@ -394,29 +408,26 @@ export class SlackChannel implements Channel {
     channelId: string,
     text: string,
   ): Promise<void> {
-    const workspacePdfPaths = this.extractWorkspaceGroupPdfPaths(text);
-    if (workspacePdfPaths.length === 0) {
+    const workspaceFilePaths = this.extractWorkspaceGroupFilePaths(text);
+    if (workspaceFilePaths.length === 0) {
       await this.postTextInChunks(channelId, text);
       return;
     }
 
-    const uploadedFileNames = await this.uploadWorkspaceGroupPdfs(
+    const uploadedFileNames = await this.uploadWorkspaceGroupFiles(
       jid,
       channelId,
-      workspacePdfPaths,
+      workspaceFilePaths,
     );
 
     if (uploadedFileNames.length > 0) {
-      await this.postTextInChunks(
-        channelId,
-        this.formatUploadedFileMessage(uploadedFileNames),
-      );
+      // Attachment-only mode: if at least one file is uploaded, do not send text.
       return;
     }
 
     await this.postTextInChunks(
       channelId,
-      'PDF 已生成，但上传失败。请稍后重试。',
+      '检测到文件路径，但上传失败。请稍后重试。',
     );
   }
 
@@ -486,21 +497,25 @@ export class SlackChannel implements Channel {
     }
   }
 
-  private formatUploadedFileMessage(fileNames: string[]): string {
-    const uniqueNames = [...new Set(fileNames)];
-    if (uniqueNames.length === 1) {
-      return `已上传文件：${uniqueNames[0]}`;
-    }
-    return `已上传文件：\n${uniqueNames.map((name) => `• ${name}`).join('\n')}`;
-  }
-
-  private extractWorkspaceGroupPdfPaths(text: string): string[] {
+  private extractWorkspaceGroupFilePaths(text: string): string[] {
     const paths = new Set<string>();
-    for (const match of text.matchAll(WORKSPACE_GROUP_PDF_RE)) {
+    for (const match of text.matchAll(WORKSPACE_GROUP_FILE_RE)) {
       const p = match[1];
-      if (p) paths.add(p);
+      if (!p) continue;
+      const normalizedPath = path.posix.normalize(p);
+      if (this.isSupportedWorkspaceUploadPath(normalizedPath)) {
+        paths.add(normalizedPath);
+      }
     }
     return [...paths];
+  }
+
+  private isSupportedWorkspaceUploadPath(workspacePath: string): boolean {
+    const lower = workspacePath.toLowerCase();
+    for (const ext of SUPPORTED_WORKSPACE_UPLOAD_EXTS) {
+      if (lower.endsWith(ext)) return true;
+    }
+    return false;
   }
 
   private resolveHostPathFromWorkspacePath(
@@ -527,14 +542,22 @@ export class SlackChannel implements Channel {
     return path.resolve(groupDir, relativePath);
   }
 
-  private async uploadWorkspaceGroupPdfs(
+  private async uploadWorkspaceGroupFiles(
     jid: string,
     channelId: string,
-    workspacePdfPaths: string[],
+    workspaceFilePaths: string[],
   ): Promise<string[]> {
     const uploaded: string[] = [];
 
-    for (const workspacePath of workspacePdfPaths) {
+    for (const workspacePath of workspaceFilePaths) {
+      if (!this.isSupportedWorkspaceUploadPath(workspacePath)) {
+        logger.warn(
+          { jid, workspacePath },
+          'Referenced file extension is not supported for Slack upload',
+        );
+        continue;
+      }
+
       const hostPath = this.resolveHostPathFromWorkspacePath(
         jid,
         workspacePath,
@@ -542,7 +565,7 @@ export class SlackChannel implements Channel {
       if (!hostPath) {
         logger.warn(
           { jid, workspacePath },
-          'Could not resolve workspace PDF path for Slack upload',
+          'Could not resolve workspace file path for Slack upload',
         );
         continue;
       }
@@ -550,7 +573,7 @@ export class SlackChannel implements Channel {
       if (!fs.existsSync(hostPath) || !fs.statSync(hostPath).isFile()) {
         logger.warn(
           { jid, workspacePath, hostPath },
-          'Referenced PDF does not exist on host, skipping Slack upload',
+          'Referenced file does not exist on host, skipping Slack upload',
         );
         continue;
       }
@@ -566,12 +589,12 @@ export class SlackChannel implements Channel {
         uploaded.push(fileName);
         logger.info(
           { jid, workspacePath, hostPath, fileName },
-          'Uploaded PDF to Slack',
+          'Uploaded file to Slack',
         );
       } catch (err) {
         logger.warn(
           { jid, workspacePath, hostPath, err },
-          'Failed to upload PDF to Slack',
+          'Failed to upload file to Slack',
         );
       }
     }
